@@ -190,7 +190,8 @@ def search_duckduckgo_web():
         
         # 2. Convocações (buscando nas bancas)
         for alvo in CONVOCACOES_ALVO:
-            q = f'"{alvo["orgao"]}" convocação {alvo["cargo"].replace('"', '')} (site:cebraspe.org.br OR site:fgv.br OR site:concursosfcc.com.br)'
+            cargo_clean = alvo["cargo"].replace('"', '')
+            q = f'"{alvo["orgao"]}" convocação {cargo_clean} (site:cebraspe.org.br OR site:fgv.br OR site:concursosfcc.com.br)'
             alertas.extend(perform_ddg_search(q, f"Fila na Banca: {alvo['orgao']}", "Acompanhamento de Filas/Convocações"))
             
         # 3. Novos Editais Regionais (Centro-Oeste e Sudeste - APENAS ÁREA JURÍDICA)
