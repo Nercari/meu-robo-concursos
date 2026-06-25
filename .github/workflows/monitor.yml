@@ -1,0 +1,39 @@
+name: Robo Concursos Monitor
+
+on:
+  schedule:
+    # 08:00, 14:00, 20:00, 02:00 UTC (Equivale a 05h, 11h, 17h, 23h BRT)
+    - cron: '0 8,14,20,2 * * *'
+  workflow_dispatch: # Permite rodar manualmente com um clique!
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Necessário para salvar o banco de dados de volta no repositório
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Cloud Monitor
+        run: python cloud_monitor.py
+
+      - name: Commit and push database
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add alertas_nuvem.db
+          # Só commita se o banco de dados tiver sido modificado (novos alertas)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Atualizando alertas.db" && git push)
