@@ -22,9 +22,9 @@ except ImportError:
 CANDIDATO_NOME = "PEDRO MOURA NERES DE CARVALHO"
 DB_PATH = os.path.join(os.path.dirname(__file__), 'alertas_nuvem.db')
 
-EMAIL_SENDER = os.getenv("EMAIL_SENDER", "pedromneresc@outlook.com")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "FYxVfC%AbfDFr7$R8kdRqMC#@T9Vn@rw9rgZkwsUmvM83462^r")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "pedromneresc@outlook.com")
+# Configurações do Telegram
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8837567755:AAFtRHLRgsMT2FOOD2lPa8NZ7PKbFlIJZ9c")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "8506704219")
 DATAJUD_API_KEY = os.getenv("DATAJUD_API_KEY", "cDZHYzlZa0JadVREZDJCendQbXY6SkJlTzNjLV9TRENyQk1RdnFKZGRQdw==")
 
 # ======= REGRAS DE NEGÓCIO =======
@@ -201,58 +201,52 @@ def search_duckduckgo_web():
         print(f"Erro Geração DDG: {e}")
     return alertas
 
-# ======= ENVIO DE EMAIL =======
-def send_email(novos_alertas):
+# ======= ENVIO DE TELEGRAM =======
+def send_telegram(novos_alertas):
     if not novos_alertas:
         return
         
-    msg = MIMEMultipart("alternative")
-    msg['Subject'] = f"🚨 ALERTA: Concursos e Monitoramento"
-    msg['From'] = EMAIL_SENDER
-    msg['To'] = EMAIL_RECEIVER
-
     # Agrupar alertas por categoria
     categorias = {"Alertas Pessoais (Seu Nome)": [], "Acompanhamento de Filas/Convocações": [], "Radar de Novos Editais": []}
     for a in novos_alertas:
         if a['categoria'] in categorias:
             categorias[a['categoria']].append(a)
 
-    html = f"""
-    <html>
-      <body style="font-family: Arial, sans-serif; color: #333;">
-        <h2>Relatório do Robô de Concursos</h2>
-        <p>Foram detectados <b>{len(novos_alertas)}</b> novos registros nas suas regras de monitoramento.</p>
-    """
+    msg = f"🚨 <b>ALERTA DO ROBÔ DE CONCURSOS</b>\n\nForam detectados <b>{len(novos_alertas)}</b> novos registros!\n\n"
     
     for cat_name, cat_alertas in categorias.items():
         if cat_alertas:
-            html += f"<hr><h3 style='color: #D32F2F;'>📌 {cat_name}</h3>"
+            msg += f"📌 <b>{cat_name}</b>\n"
             for alerta in cat_alertas:
-                html += f"""
-                <div style="margin-bottom: 20px; padding: 15px; border-left: 5px solid #005A9C; background-color: #f9f9f9;">
-                    <h4 style="margin-top: 0; color: #005A9C;">{alerta['fonte']}</h4>
-                    <p><strong>Acesso:</strong> <a href="{alerta['url']}">{alerta['url']}</a></p>
-                    <p><strong>Detalhes:</strong> {alerta['info']}</p>
-                </div>
-                """
+                msg += f"▪️ <b>{alerta['fonte']}</b>\n"
+                msg += f"Detalhes: <i>{alerta['info']}</i>\n"
+                msg += f"<a href='{alerta['url']}'>🔗 Acessar Link do Diário/Web</a>\n\n"
                 
-    html += """
-        <hr>
-        <p style="font-size: 12px; color: #888;">Este e-mail foi gerado automaticamente pelo seu robô de automação na nuvem.</p>
-      </body>
-    </html>
-    """
+    msg += "🤖 <i>Gerado automaticamente pelo Antigravity Cloud Monitor</i>"
     
-    msg.attach(MIMEText(html, 'html'))
-    try:
-        server = smtplib.SMTP('smtp-mail.outlook.com', 587)
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print(f"E-mail de alerta enviado com sucesso para {EMAIL_RECEIVER}.")
-    except Exception as e:
-        print(f"Erro ao enviar e-mail: {e}")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # Função auxiliar para enviar texto em blocos de 3500 caracteres (limite do telegram)
+    def send_chunk(text_chunk):
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text_chunk, "parse_mode": "HTML", "disable_web_page_preview": True}
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code != 200:
+                print(f"Erro Telegram: {resp.text}")
+        except Exception as e:
+            print(f"Erro conexão Telegram: {e}")
+
+    # Dividir a mensagem se for muito grande
+    if len(msg) <= 3500:
+        send_chunk(msg)
+    else:
+        # Se for gigante, quebra pela tag de item ou envia em pedaços grosseiros (removendo tags HTML pra não dar erro)
+        import re
+        msg_limpa = re.sub('<[^<]+>', '', msg) # Remove HTML para não ter problema de tag aberta
+        for i in range(0, len(msg_limpa), 3500):
+            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_limpa[i:i+3500], "disable_web_page_preview": True}
+            requests.post(url, json=payload, timeout=15)
+        print("Mensagem gigante enviada em blocos limpos!")
 
 # ======= LOOP PRINCIPAL =======
 def main():
@@ -266,8 +260,8 @@ def main():
     alertas.extend(search_duckduckgo_web())
     
     if alertas:
-        print(f"Encontrados {len(alertas)} novos alertas. Enviando e-mail...")
-        send_email(alertas)
+        print(f"Encontrados {len(alertas)} novos alertas. Enviando Telegram...")
+        send_telegram(alertas)
         for a in alertas:
             mark_processed(a['id'], a['fonte'], a['url'])
     else:
