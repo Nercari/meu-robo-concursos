@@ -81,11 +81,14 @@ def search_queridodiario():
                     })
                     
         # Busca 2: Editais Municipais da Área Jurídica
+        # Nota: O QD não aceita OR complexo facilmente na API pública, vamos usar "procurador" e "concurso público"
         params_edital = {"querystring": '"concurso público" "edital" "procurador"', "published_since": since_date.isoformat(), "size": 10}
         response_edital = requests.get(url, params=params_edital, timeout=20)
         if response_edital.status_code == 200:
             for g in response_edital.json().get('gazettes', []):
-                uf = g.get('territory_id', '')[0:2]
+                # Filtra SE/CO pelas siglas dos estados retornados
+                uf = g.get('territory_id', '')[0:2] # Pega o estado do código IBGE do território (Ex: 35 é SP)
+                # Aceita códigos IBGE do SE/CO (31 MG, 32 ES, 33 RJ, 35 SP, 50 MS, 51 MT, 52 GO, 53 DF)
                 if uf in ['31', '32', '33', '35', '50', '51', '52', '53']:
                     g_id = "qd_edital_" + g.get('id', g.get('url'))
                     if not is_processed(g_id):
@@ -137,7 +140,7 @@ def perform_dou_search(scraper, query, label, categoria):
                     "id": alerta_id, "fonte": f"DOU - {label}",
                     "url": url, "info": "Registro detectado no DOU oficial hoje para este termo."
                 })
-        time.sleep(2)
+        time.sleep(2) # Evitar block
     except Exception as e:
         print(f"Erro DOU ({label}): {e}")
     return alertas
@@ -146,12 +149,15 @@ def search_dou_cloudscraper():
     alertas = []
     try:
         scraper = cloudscraper.create_scraper()
+        # 1. Pessoal
         alertas.extend(perform_dou_search(scraper, f'"{CANDIDATO_NOME}"', "Seu Nome", "Alertas Pessoais (Seu Nome)"))
         
+        # 2. Convocações
         for alvo in CONVOCACOES_ALVO:
             q = f'"{alvo["orgao"]}" "convocação" {alvo["cargo"]}'
             alertas.extend(perform_dou_search(scraper, q, f"Fila: {alvo['orgao']}", "Acompanhamento de Filas/Convocações"))
             
+        # 3. Novos Editais (Cargos Jurídicos Federais)
         q_editais = '"edital de abertura" "concurso público" ("procurador" OR "defensor" OR "juiz" OR "promotor" OR "advogado da união" OR "analista judiciário")'
         alertas.extend(perform_dou_search(scraper, q_editais, "Novos Editais (Jurídicos Federais)", "Radar de Novos Editais"))
     except Exception as e:
@@ -179,13 +185,16 @@ def perform_ddg_search(query, label, categoria):
 def search_duckduckgo_web():
     alertas = []
     try:
+        # 1. Pessoal
         alertas.extend(perform_ddg_search(f'"{CANDIDATO_NOME}"', "Menção Web", "Alertas Pessoais (Seu Nome)"))
         
+        # 2. Convocações (buscando nas bancas)
         for alvo in CONVOCACOES_ALVO:
             cargo_clean = alvo["cargo"].replace('"', '')
             q = f'"{alvo["orgao"]}" convocação {cargo_clean} (site:cebraspe.org.br OR site:fgv.br OR site:concursosfcc.com.br)'
             alertas.extend(perform_ddg_search(q, f"Fila na Banca: {alvo['orgao']}", "Acompanhamento de Filas/Convocações"))
             
+        # 3. Novos Editais Regionais (Centro-Oeste e Sudeste - APENAS ÁREA JURÍDICA)
         q_reg = '"edital de abertura" "concurso público" ("procurador" OR "defensor" OR "juiz" OR "promotor" OR "advogado" OR "analista judiciário") (GO OR MT OR MS OR DF OR SP OR RJ OR MG OR ES)'
         alertas.extend(perform_ddg_search(q_reg, "Novos Editais (Jurídicos SE/CO)", "Radar de Novos Editais"))
     except Exception as e:
@@ -202,18 +211,6 @@ def send_telegram(novos_alertas):
         if a['categoria'] in categorias:
             categorias[a['categoria']].append(a)
 
-    msg = f"🚨 <b>ALERTA DO ROBÔ DE CONCURSOS</b>\n\nForam detectados <b>{len(novos_alertas)}</b> novos registros!\n\n"
-    
-    for cat_name, cat_alertas in categorias.items():
-        if cat_alertas:
-            msg += f"📌 <b>{cat_name}</b>\n"
-            for alerta in cat_alertas:
-                msg += f"▪️ <b>{alerta['fonte']}</b>\n"
-                msg += f"Detalhes: <i>{alerta['info']}</i>\n"
-                msg += f"<a href='{alerta['url']}'>🔗 Acessar Link do Diário/Web</a>\n\n"
-                
-    msg += "🤖 <i>Gerado automaticamente pelo Antigravity Cloud Monitor</i>"
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
     def send_chunk(text_chunk):
@@ -225,15 +222,35 @@ def send_telegram(novos_alertas):
         except Exception as e:
             print(f"Erro conexão Telegram: {e}")
 
-    if len(msg) <= 3500:
-        send_chunk(msg)
-    else:
-        import re
-        msg_limpa = re.sub('<[^<]+>', '', msg)
-        for i in range(0, len(msg_limpa), 3500):
-            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_limpa[i:i+3500], "disable_web_page_preview": True}
-            requests.post(url, json=payload, timeout=15)
-        print("Mensagem gigante enviada em blocos limpos!")
+    msg_atual = f"🚨 <b>ALERTA DO ROBÔ DE CONCURSOS</b>\n\nForam detectados <b>{len(novos_alertas)}</b> novos registros!\n\n"
+    
+    for cat_name, cat_alertas in categorias.items():
+        if cat_alertas:
+            titulo_cat = f"📌 <b>{cat_name}</b>\n"
+            if len(msg_atual) + len(titulo_cat) > 3500:
+                send_chunk(msg_atual)
+                msg_atual = ""
+            msg_atual += titulo_cat
+            
+            for alerta in cat_alertas:
+                link_url = alerta['url'].replace("&", "&amp;")
+                info_text = alerta['info'].replace("<", "").replace(">", "")
+                fonte_text = alerta['fonte'].replace("<", "").replace(">", "")
+                
+                bloco_alerta = f"▪️ <b>{fonte_text}</b>\nDetalhes: <i>{info_text}</i>\n🔗 <a href='{link_url}'>Acessar Link Oficial</a>\n\n"
+                
+                if len(msg_atual) + len(bloco_alerta) > 3500:
+                    send_chunk(msg_atual)
+                    msg_atual = ""
+                    
+                msg_atual += bloco_alerta
+
+    if msg_atual.strip():
+        msg_atual += "🤖 <i>Gerado automaticamente pelo Antigravity Cloud Monitor</i>"
+        if len(msg_atual) > 3500:
+            send_chunk(msg_atual[:3500])
+        else:
+            send_chunk(msg_atual)
 
 # ======= LOOP PRINCIPAL =======
 def main():
