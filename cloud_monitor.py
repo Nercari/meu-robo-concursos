@@ -9,11 +9,6 @@ from email.mime.multipart import MIMEMultipart
 import requests
 
 try:
-    import cloudscraper
-except ImportError:
-    pass
-
-try:
     from duckduckgo_search import DDGS
 except ImportError:
     pass
@@ -74,28 +69,29 @@ def search_queridodiario():
             for g in response.json().get('gazettes', []):
                 g_id = "qd_nome_" + g.get('id', g.get('url'))
                 if not is_processed(g_id):
+                    excertos = g.get('excerpts', [])
+                    trecho = excertos[0] if excertos else f"Data: {g.get('date', '')}"
                     alertas.append({
                         "categoria": "Alertas Pessoais (Seu Nome)",
                         "id": g_id, "fonte": "Querido Diário (Município: " + g.get('territory_name', '') + ")",
-                        "url": g.get('url', ''), "info": f"Data: {g.get('date', '')}"
+                        "url": g.get('url', ''), "info": f"Trecho: {trecho[:300]}..."
                     })
                     
         # Busca 2: Editais Municipais da Área Jurídica
-        # Nota: O QD não aceita OR complexo facilmente na API pública, vamos usar "procurador" e "concurso público"
         params_edital = {"querystring": '"concurso público" "edital" "procurador"', "published_since": since_date.isoformat(), "size": 10}
         response_edital = requests.get(url, params=params_edital, timeout=20)
         if response_edital.status_code == 200:
             for g in response_edital.json().get('gazettes', []):
-                # Filtra SE/CO pelas siglas dos estados retornados
-                uf = g.get('territory_id', '')[0:2] # Pega o estado do código IBGE do território (Ex: 35 é SP)
-                # Aceita códigos IBGE do SE/CO (31 MG, 32 ES, 33 RJ, 35 SP, 50 MS, 51 MT, 52 GO, 53 DF)
+                uf = g.get('territory_id', '')[0:2]
                 if uf in ['31', '32', '33', '35', '50', '51', '52', '53']:
                     g_id = "qd_edital_" + g.get('id', g.get('url'))
                     if not is_processed(g_id):
+                        excertos = g.get('excerpts', [])
+                        trecho = excertos[0] if excertos else f"Data: {g.get('date', '')}"
                         alertas.append({
                             "categoria": "Radar de Novos Editais",
                             "id": g_id, "fonte": "Querido Diário (Edital Mun: " + g.get('territory_name', '') + ")",
-                            "url": g.get('url', ''), "info": f"Novo edital possivelmente jurídico. Data: {g.get('date', '')}"
+                            "url": g.get('url', ''), "info": f"Trecho do Edital: {trecho[:300]}..."
                         })
     except Exception as e:
         print(f"Erro Querido Diário: {e}")
@@ -106,6 +102,8 @@ def search_datajud():
     tribunais = ["trf4", "trf6", "tse", "tre-go", "tre-df"]
     headers = {"Authorization": f"APIKey {DATAJUD_API_KEY}", "Content-Type": "application/json"}
     payload = {"query": {"match_phrase": {"partes.nome": CANDIDATO_NOME}}, "size": 10}
+    limite_data = datetime.datetime.now() - datetime.timedelta(days=30) # Corta processos muito antigos (retroativos)
+    
     for tribunal in tribunais:
         url = f"https://api-publica.datajud.cnj.jus.br/api_publica_{tribunal}/_search"
         try:
@@ -115,90 +113,67 @@ def search_datajud():
                 for hit in hits:
                     source = hit.get('_source', {})
                     num_processo = source.get('numeroProcesso', 'N/A')
+                    data_ajuizamento_str = source.get('dataAjuizamento', '')
+                    
+                    # Filtra apenas processos recentes para evitar avalanche de processos antigos de anos atrás
+                    if data_ajuizamento_str:
+                        try:
+                            # Tenta parsear a data (Ex: 2026-06-25T14:30:00.000Z)
+                            data_ajuizamento = datetime.datetime.fromisoformat(data_ajuizamento_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                            if data_ajuizamento < limite_data:
+                                continue # Ignora processos velhos
+                        except:
+                            pass
+                            
                     alerta_id = f"datajud_{tribunal}_{num_processo}"
                     if not is_processed(alerta_id):
+                        classe = source.get('classe', {}).get('nome', 'N/A')
+                        assuntos = [a.get('nome', '') for a in source.get('assuntos', [])]
+                        assunto_str = ", ".join(assuntos)[:150]
                         alertas.append({
                             "categoria": "Alertas Pessoais (Seu Nome)",
                             "id": alerta_id, "fonte": f"DataJud ({tribunal.upper()})",
-                            "url": f"Processo Nº {num_processo}", "info": f"Autuação: {source.get('dataAjuizamento', 'N/A')}"
+                            "url": f"Processo Nº {num_processo}", "info": f"Classe: {classe} | Assuntos: {assunto_str} | Data: {data_ajuizamento_str[:10]}"
                         })
         except Exception as e:
             print(f"Erro DataJud {tribunal}: {e}")
     return alertas
 
-def perform_dou_search(scraper, query, label, categoria):
-    alertas = []
-    try:
-        q_encoded = query.replace(" ", "+")
-        url = f"https://www.in.gov.br/consulta/-/buscar/dou?q={q_encoded}&s=todos&exactDate=all&sortType=0"
-        response = scraper.get(url, timeout=30)
-        if response.status_code == 200 and "Nenhum resultado" not in response.text and "0 Resultados" not in response.text:
-            alerta_id = f"dou_{label}_{datetime.date.today().isoformat()}"
-            if not is_processed(alerta_id):
-                alertas.append({
-                    "categoria": categoria,
-                    "id": alerta_id, "fonte": f"DOU - {label}",
-                    "url": url, "info": "Registro detectado no DOU oficial hoje para este termo."
-                })
-        time.sleep(2) # Evitar block
-    except Exception as e:
-        print(f"Erro DOU ({label}): {e}")
-    return alertas
-
-def search_dou_cloudscraper():
-    alertas = []
-    try:
-        scraper = cloudscraper.create_scraper()
-        # 1. Pessoal
-        alertas.extend(perform_dou_search(scraper, f'"{CANDIDATO_NOME}"', "Seu Nome", "Alertas Pessoais (Seu Nome)"))
-        
-        # 2. Convocações
-        for alvo in CONVOCACOES_ALVO:
-            q = f'"{alvo["orgao"]}" "convocação" {alvo["cargo"]}'
-            alertas.extend(perform_dou_search(scraper, q, f"Fila: {alvo['orgao']}", "Acompanhamento de Filas/Convocações"))
-            
-        # 3. Novos Editais (Cargos Jurídicos Federais)
-        q_editais = '"edital de abertura" "concurso público" ("procurador" OR "defensor" OR "juiz" OR "promotor" OR "advogado da união" OR "analista judiciário")'
-        alertas.extend(perform_dou_search(scraper, q_editais, "Novos Editais (Jurídicos Federais)", "Radar de Novos Editais"))
-    except Exception as e:
-        print(f"Erro Geração Scraper DOU: {e}")
-    return alertas
-
 def perform_ddg_search(query, label, categoria):
     alertas = []
     try:
-        resultados = DDGS().text(query, max_results=3)
+        resultados = DDGS().text(query, max_results=3, timelimit='d') # Limitado a resultados detectados nos ultimos dias
         for r in resultados:
             url = r.get('href')
             alerta_id = f"ddg_{label}_{url}"
             if not is_processed(alerta_id):
                 alertas.append({
                     "categoria": categoria,
-                    "id": alerta_id, "fonte": f"Web ({label})",
-                    "url": url, "info": f"Encontrado em: {r.get('title')}\nTrecho: {r.get('body')}"
+                    "id": alerta_id, "fonte": f"Web/DOU ({label})",
+                    "url": url, "info": f"{r.get('title')}\nTrecho: {r.get('body')}"
                 })
         time.sleep(2)
     except Exception as e:
         print(f"Erro DuckDuckGo ({label}): {e}")
     return alertas
 
-def search_duckduckgo_web():
+def search_web_and_dou():
     alertas = []
     try:
-        # 1. Pessoal
-        alertas.extend(perform_ddg_search(f'"{CANDIDATO_NOME}"', "Menção Web", "Alertas Pessoais (Seu Nome)"))
+        # 1. Pessoal (Geral + DOU)
+        alertas.extend(perform_ddg_search(f'"{CANDIDATO_NOME}"', "Menção Geral/DOU", "Alertas Pessoais (Seu Nome)"))
         
-        # 2. Convocações (buscando nas bancas)
+        # 2. Convocações (Bancas + DOU)
         for alvo in CONVOCACOES_ALVO:
             cargo_clean = alvo["cargo"].replace('"', '')
-            q = f'"{alvo["orgao"]}" convocação {cargo_clean} (site:cebraspe.org.br OR site:fgv.br OR site:concursosfcc.com.br)'
-            alertas.extend(perform_ddg_search(q, f"Fila na Banca: {alvo['orgao']}", "Acompanhamento de Filas/Convocações"))
+            q = f'"{alvo["orgao"]}" convocação {cargo_clean} (site:cebraspe.org.br OR site:fgv.br OR site:concursosfcc.com.br OR site:in.gov.br)'
+            alertas.extend(perform_ddg_search(q, f"Fila na Banca/DOU: {alvo['orgao']}", "Acompanhamento de Filas/Convocações"))
             
-        # 3. Novos Editais Regionais (Centro-Oeste e Sudeste - APENAS ÁREA JURÍDICA)
-        q_reg = '"edital de abertura" "concurso público" ("procurador" OR "defensor" OR "juiz" OR "promotor" OR "advogado" OR "analista judiciário") (GO OR MT OR MS OR DF OR SP OR RJ OR MG OR ES)'
-        alertas.extend(perform_ddg_search(q_reg, "Novos Editais (Jurídicos SE/CO)", "Radar de Novos Editais"))
+        # 3. Novos Editais Regionais (Centro-Oeste e Sudeste - APENAS ÁREA JURÍDICA + DOU Nacional)
+        q_reg = '"edital de abertura" "concurso público" ("procurador" OR "defensor" OR "juiz" OR "promotor" OR "advogado" OR "analista judiciário") (GO OR MT OR MS OR DF OR SP OR RJ OR MG OR ES OR site:in.gov.br)'
+        alertas.extend(perform_ddg_search(q_reg, "Novos Editais (Jurídicos SE/CO/DOU)", "Radar de Novos Editais"))
     except Exception as e:
-        print(f"Erro Geração DDG: {e}")
+        print(f"Erro Geração DDG/DOU: {e}")
     return alertas
 
 # ======= ENVIO DE TELEGRAM =======
@@ -233,11 +208,12 @@ def send_telegram(novos_alertas):
             msg_atual += titulo_cat
             
             for alerta in cat_alertas:
-                link_url = alerta['url'].replace("&", "&amp;")
-                info_text = alerta['info'].replace("<", "").replace(">", "")
-                fonte_text = alerta['fonte'].replace("<", "").replace(">", "")
+                # Remove tags HTML acidentais do texto extraido para nao quebrar o layout do telegram
+                info_text = alerta['info'].replace("<", "").replace(">", "").strip()
+                fonte_text = alerta['fonte'].replace("<", "").replace(">", "").strip()
                 
-                bloco_alerta = f"▪️ <b>{fonte_text}</b>\nDetalhes: <i>{info_text}</i>\n🔗 <a href='{link_url}'>Acessar Link Oficial</a>\n\n"
+                # Deixa a URL crua para o telegram converter automaticamente em link clicavel, evitando problemas com href tag
+                bloco_alerta = f"▪️ <b>{fonte_text}</b>\nDetalhes: <i>{info_text}</i>\n🔗 Link: {alerta['url']}\n\n"
                 
                 if len(msg_atual) + len(bloco_alerta) > 3500:
                     send_chunk(msg_atual)
@@ -260,8 +236,7 @@ def main():
     alertas = []
     alertas.extend(search_queridodiario())
     alertas.extend(search_datajud())
-    alertas.extend(search_dou_cloudscraper())
-    alertas.extend(search_duckduckgo_web())
+    alertas.extend(search_web_and_dou())
     
     if alertas:
         print(f"Encontrados {len(alertas)} novos alertas. Enviando Telegram...")
